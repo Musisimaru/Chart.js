@@ -1,64 +1,27 @@
-'use strict';
+import {acquireChart, releaseChart, createMockContext, afterEvent, waitForResize, injectWrapperCSS, specsFromFixtures, triggerMouseEvent, addMatchers, releaseCharts} from 'chartjs-test-utils';
 
-var fixture = require('./fixture');
-var Context = require('./context');
-var matchers = require('./matchers');
-var utils = require('./utils');
+// force ratio=1 for tests on high-res/retina devices
+// fixes https://github.com/chartjs/Chart.js/issues/4515
+window.devicePixelRatio = 1;
 
-(function() {
+window.acquireChart = acquireChart;
+window.afterEvent = afterEvent;
+window.releaseChart = releaseChart;
+window.waitForResize = waitForResize;
+window.createMockContext = createMockContext;
 
-	// Keep track of all acquired charts to automatically release them after each specs
-	var charts = {};
+injectWrapperCSS();
 
-	function acquireChart() {
-		var chart = utils.acquireChart.apply(utils, arguments);
-		charts[chart.id] = chart;
-		return chart;
-	}
+jasmine.fixture = {
+  specs: specsFromFixtures
+};
 
-	function releaseChart(chart) {
-		utils.releaseChart.apply(utils, arguments);
-		delete charts[chart.id];
-	}
+jasmine.triggerMouseEvent = triggerMouseEvent;
 
-	function createMockContext() {
-		return new Context();
-	}
+beforeEach(function() {
+  addMatchers();
+});
 
-	// force ratio=1 for tests on high-res/retina devices
-	// fixes https://github.com/chartjs/Chart.js/issues/4515
-	window.devicePixelRatio = 1;
-
-	window.acquireChart = acquireChart;
-	window.releaseChart = releaseChart;
-	window.waitForResize = utils.waitForResize;
-	window.createMockContext = createMockContext;
-
-	// some style initialization to limit differences between browsers across different platforms.
-	utils.injectCSS(
-		'.chartjs-wrapper, .chartjs-wrapper canvas {' +
-			'border: 0;' +
-			'margin: 0;' +
-			'padding: 0;' +
-		'}' +
-		'.chartjs-wrapper {' +
-			'position: absolute' +
-		'}');
-
-	jasmine.fixture = fixture;
-	jasmine.triggerMouseEvent = utils.triggerMouseEvent;
-
-	beforeEach(function() {
-		jasmine.addMatchers(matchers);
-	});
-
-	afterEach(function() {
-		// Auto releasing acquired charts
-		Object.keys(charts).forEach(function(id) {
-			var chart = charts[id];
-			if (!(chart.$test || {}).persistent) {
-				releaseChart(chart);
-			}
-		});
-	});
-}());
+afterEach(function() {
+  releaseCharts();
+});

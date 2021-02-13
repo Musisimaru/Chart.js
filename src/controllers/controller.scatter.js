@@ -1,39 +1,43 @@
-'use strict';
+import LineController from './controller.line';
 
-var LineController = require('./controller.line');
-var defaults = require('../core/core.defaults');
+export default class ScatterController extends LineController {
 
-defaults._set('scatter', {
-	hover: {
-		mode: 'single'
-	},
+}
 
-	scales: {
-		xAxes: [{
-			id: 'x-axis-1',    // need an ID so datasets can reference the scale
-			type: 'linear',    // scatter should not use a category axis
-			position: 'bottom'
-		}],
-		yAxes: [{
-			id: 'y-axis-1',
-			type: 'linear',
-			position: 'left'
-		}]
-	},
+ScatterController.id = 'scatter';
 
-	showLines: false,
+/**
+ * @type {any}
+ */
+ScatterController.defaults = {
+  scales: {
+    x: {
+      type: 'linear'
+    },
+    y: {
+      type: 'linear'
+    }
+  },
 
-	tooltips: {
-		callbacks: {
-			title: function() {
-				return '';     // doesn't make sense for scatter since data are formatted as a point
-			},
-			label: function(item) {
-				return '(' + item.xLabel + ', ' + item.yLabel + ')';
-			}
-		}
-	}
-});
+  datasets: {
+    showLine: false,
+    fill: false
+  },
 
-// Scatter charts use line controllers
-module.exports = LineController;
+  interaction: {
+    mode: 'point'
+  },
+
+  plugins: {
+    tooltip: {
+      callbacks: {
+        title() {
+          return '';     // doesn't make sense for scatter since data are formatted as a point
+        },
+        label(item) {
+          return '(' + item.label + ', ' + item.formattedValue + ')';
+        }
+      }
+    }
+  }
+};

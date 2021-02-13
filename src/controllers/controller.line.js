@@ -1,367 +1,231 @@
-'use strict';
+import DatasetController from '../core/core.datasetController';
+import {valueOrDefault} from '../helpers/helpers.core';
+import {isNumber, _limitValue} from '../helpers/helpers.math';
+import {resolve} from '../helpers/helpers.options';
+import {_lookupByKey} from '../helpers/helpers.collection';
 
-var DatasetController = require('../core/core.datasetController');
-var defaults = require('../core/core.defaults');
-var elements = require('../elements/index');
-var helpers = require('../helpers/index');
+export default class LineController extends DatasetController {
 
-var valueOrDefault = helpers.valueOrDefault;
-var resolve = helpers.options.resolve;
-var isPointInArea = helpers.canvas._isPointInArea;
+  initialize() {
+    this.enableOptionSharing = true;
+    super.initialize();
+  }
 
-defaults._set('line', {
-	showLines: true,
-	spanGaps: false,
+  update(mode) {
+    const me = this;
+    const meta = me._cachedMeta;
+    const {dataset: line, data: points = []} = meta;
+    // @ts-ignore
+    const animationsDisabled = me.chart._animationsDisabled;
+    let {start, count} = getStartAndCountOfVisiblePoints(meta, points, animationsDisabled);
 
-	hover: {
-		mode: 'label'
-	},
+    me._drawStart = start;
+    me._drawCount = count;
 
-	scales: {
-		xAxes: [{
-			type: 'category',
-			id: 'x-axis-0'
-		}],
-		yAxes: [{
-			type: 'linear',
-			id: 'y-axis-0'
-		}]
-	}
-});
+    if (scaleRangesChanged(meta) && !animationsDisabled) {
+      start = 0;
+      count = points.length;
+    }
 
-function lineEnabled(dataset, options) {
-	return valueOrDefault(dataset.showLine, options.showLines);
-}
+    // Update Line
+    line.points = points;
 
-module.exports = DatasetController.extend({
+    // In resize mode only point locations change, so no need to set the options.
+    if (mode !== 'resize') {
+      me.updateElement(line, undefined, {
+        animated: !animationsDisabled,
+        options: me.resolveDatasetElementOptions()
+      }, mode);
+    }
 
-	datasetElementType: elements.Line,
+    // Update Points
+    me.updateElements(points, start, count, mode);
+  }
 
-	dataElementType: elements.Point,
+  updateElements(points, start, count, mode) {
+    const me = this;
+    const reset = mode === 'reset';
+    const {xScale, yScale, _stacked} = me._cachedMeta;
+    const firstOpts = me.resolveDataElementOptions(start, mode);
+    const sharedOptions = me.getSharedOptions(firstOpts);
+    const includeOptions = me.includeOptions(mode, sharedOptions);
+    const spanGaps = valueOrDefault(me._config.spanGaps, me.chart.options.spanGaps);
+    const maxGapLength = isNumber(spanGaps) ? spanGaps : Number.POSITIVE_INFINITY;
+    const directUpdate = me.chart._animationsDisabled || reset || mode === 'none';
+    let prevParsed = start > 0 && me.getParsed(start - 1);
 
-	update: function(reset) {
-		var me = this;
-		var meta = me.getMeta();
-		var line = meta.dataset;
-		var points = meta.data || [];
-		var scale = me.getScaleForId(meta.yAxisID);
-		var dataset = me.getDataset();
-		var showLine = lineEnabled(dataset, me.chart.options);
-		var i, ilen;
+    for (let i = start; i < start + count; ++i) {
+      const point = points[i];
+      const parsed = me.getParsed(i);
+      const properties = directUpdate ? point : {};
+      const x = properties.x = xScale.getPixelForValue(parsed.x, i);
+      const y = properties.y = reset ? yScale.getBasePixel() : yScale.getPixelForValue(_stacked ? me.applyStack(yScale, parsed) : parsed.y, i);
+      properties.skip = isNaN(x) || isNaN(y);
+      properties.stop = i > 0 && (parsed.x - prevParsed.x) > maxGapLength;
 
-		// Update Line
-		if (showLine) {
-			// Compatibility: If the properties are defined with only the old name, use those values
-			if ((dataset.tension !== undefined) && (dataset.lineTension === undefined)) {
-				dataset.lineTension = dataset.tension;
-			}
+      if (includeOptions) {
+        properties.options = sharedOptions || me.resolveDataElementOptions(i, mode);
+      }
 
-			// Utility
-			line._scale = scale;
-			line._datasetIndex = me.index;
-			// Data
-			line._children = points;
-			// Model
-			line._model = me._resolveLineOptions(line);
+      if (!directUpdate) {
+        me.updateElement(point, i, properties, mode);
+      }
 
-			line.pivot();
-		}
+      prevParsed = parsed;
+    }
 
-		// Update Points
-		for (i = 0, ilen = points.length; i < ilen; ++i) {
-			me.updateElement(points[i], i, reset);
-		}
+    me.updateSharedOptions(sharedOptions, mode, firstOpts);
+  }
 
-		if (showLine && line._model.tension !== 0) {
-			me.updateBezierControlPoints();
-		}
-
-		// Now pivot the point for animation
-		for (i = 0, ilen = points.length; i < ilen; ++i) {
-			points[i].pivot();
-		}
-	},
-
-	updateElement: function(point, index, reset) {
-		var me = this;
-		var meta = me.getMeta();
-		var custom = point.custom || {};
-		var dataset = me.getDataset();
-		var datasetIndex = me.index;
-		var value = dataset.data[index];
-		var yScale = me.getScaleForId(meta.yAxisID);
-		var xScale = me.getScaleForId(meta.xAxisID);
-		var lineModel = meta.dataset._model;
-		var x, y;
-
-		var options = me._resolvePointOptions(point, index);
-
-		x = xScale.getPixelForValue(typeof value === 'object' ? value : NaN, index, datasetIndex);
-		y = reset ? yScale.getBasePixel() : me.calculatePointY(value, index, datasetIndex);
-
-		// Utility
-		point._xScale = xScale;
-		point._yScale = yScale;
-		point._options = options;
-		point._datasetIndex = datasetIndex;
-		point._index = index;
-
-		// Desired view properties
-		point._model = {
-			x: x,
-			y: y,
-			skip: custom.skip || isNaN(x) || isNaN(y),
-			// Appearance
-			radius: options.radius,
-			pointStyle: options.pointStyle,
-			rotation: options.rotation,
-			backgroundColor: options.backgroundColor,
-			borderColor: options.borderColor,
-			borderWidth: options.borderWidth,
-			tension: valueOrDefault(custom.tension, lineModel ? lineModel.tension : 0),
-			steppedLine: lineModel ? lineModel.steppedLine : false,
-			// Tooltip
-			hitRadius: options.hitRadius
-		};
-	},
-
-	/**
-	 * @private
-	 */
-	_resolvePointOptions: function(element, index) {
-		var me = this;
-		var chart = me.chart;
-		var dataset = chart.data.datasets[me.index];
-		var custom = element.custom || {};
-		var options = chart.options.elements.point;
-		var values = {};
-		var i, ilen, key;
-
-		// Scriptable options
-		var context = {
-			chart: chart,
-			dataIndex: index,
-			dataset: dataset,
-			datasetIndex: me.index
-		};
-
-		var ELEMENT_OPTIONS = {
-			backgroundColor: 'pointBackgroundColor',
-			borderColor: 'pointBorderColor',
-			borderWidth: 'pointBorderWidth',
-			hitRadius: 'pointHitRadius',
-			hoverBackgroundColor: 'pointHoverBackgroundColor',
-			hoverBorderColor: 'pointHoverBorderColor',
-			hoverBorderWidth: 'pointHoverBorderWidth',
-			hoverRadius: 'pointHoverRadius',
-			pointStyle: 'pointStyle',
-			radius: 'pointRadius',
-			rotation: 'pointRotation'
-		};
-		var keys = Object.keys(ELEMENT_OPTIONS);
-
-		for (i = 0, ilen = keys.length; i < ilen; ++i) {
-			key = keys[i];
-			values[key] = resolve([
-				custom[key],
-				dataset[ELEMENT_OPTIONS[key]],
-				dataset[key],
-				options[key]
-			], context, index);
-		}
-
-		return values;
-	},
-
-	/**
-	 * @private
-	 */
-	_resolveLineOptions: function(element) {
-		var me = this;
-		var chart = me.chart;
-		var datasetIndex = me.index;
-		var dataset = chart.data.datasets[datasetIndex];
-		var custom = element.custom || {};
-		var options = chart.options;
-		var elementOptions = options.elements.line;
-		var values = {};
-		var i, ilen, key;
-
-		// Scriptable options
-		var context = {
-			chart: chart,
-			dataset: dataset,
-			datasetIndex: datasetIndex
-		};
-
-		var keys = [
-			'backgroundColor',
-			'borderCapStyle',
-			'borderColor',
-			'borderDash',
-			'borderDashOffset',
-			'borderJoinStyle',
-			'borderWidth',
-			'cubicInterpolationMode',
-			'fill'
-		];
-
-		for (i = 0, ilen = keys.length; i < ilen; ++i) {
-			key = keys[i];
-			values[key] = resolve([
-				custom[key],
-				dataset[key],
-				elementOptions[key]
-			], context);
-		}
-
-		// The default behavior of lines is to break at null values, according
-		// to https://github.com/chartjs/Chart.js/issues/2435#issuecomment-216718158
-		// This option gives lines the ability to span gaps
-		values.spanGaps = valueOrDefault(dataset.spanGaps, options.spanGaps);
-		values.tension = valueOrDefault(dataset.lineTension, elementOptions.tension);
-		values.steppedLine = resolve([custom.steppedLine, dataset.steppedLine, elementOptions.stepped]);
-
-		return values;
-	},
-
-	calculatePointY: function(value, index, datasetIndex) {
-		var me = this;
-		var chart = me.chart;
-		var meta = me.getMeta();
-		var yScale = me.getScaleForId(meta.yAxisID);
-		var sumPos = 0;
-		var sumNeg = 0;
-		var i, ds, dsMeta;
-
-		if (yScale.options.stacked) {
-			for (i = 0; i < datasetIndex; i++) {
-				ds = chart.data.datasets[i];
-				dsMeta = chart.getDatasetMeta(i);
-				if (dsMeta.type === 'line' && dsMeta.yAxisID === yScale.id && chart.isDatasetVisible(i)) {
-					var stackedRightValue = Number(yScale.getRightValue(ds.data[index]));
-					if (stackedRightValue < 0) {
-						sumNeg += stackedRightValue || 0;
-					} else {
-						sumPos += stackedRightValue || 0;
-					}
-				}
-			}
-
-			var rightValue = Number(yScale.getRightValue(value));
-			if (rightValue < 0) {
-				return yScale.getPixelForValue(sumNeg + rightValue);
-			}
-			return yScale.getPixelForValue(sumPos + rightValue);
-		}
-
-		return yScale.getPixelForValue(value);
-	},
-
-	updateBezierControlPoints: function() {
-		var me = this;
-		var chart = me.chart;
-		var meta = me.getMeta();
-		var lineModel = meta.dataset._model;
-		var area = chart.chartArea;
-		var points = meta.data || [];
-		var i, ilen, model, controlPoints;
-
-		// Only consider points that are drawn in case the spanGaps option is used
-		if (lineModel.spanGaps) {
-			points = points.filter(function(pt) {
-				return !pt._model.skip;
-			});
-		}
-
-		function capControlPoint(pt, min, max) {
-			return Math.max(Math.min(pt, max), min);
-		}
-
-		if (lineModel.cubicInterpolationMode === 'monotone') {
-			helpers.splineCurveMonotone(points);
-		} else {
-			for (i = 0, ilen = points.length; i < ilen; ++i) {
-				model = points[i]._model;
-				controlPoints = helpers.splineCurve(
-					helpers.previousItem(points, i)._model,
-					model,
-					helpers.nextItem(points, i)._model,
-					lineModel.tension
-				);
-				model.controlPointPreviousX = controlPoints.previous.x;
-				model.controlPointPreviousY = controlPoints.previous.y;
-				model.controlPointNextX = controlPoints.next.x;
-				model.controlPointNextY = controlPoints.next.y;
-			}
-		}
-
-		if (chart.options.elements.line.capBezierPoints) {
-			for (i = 0, ilen = points.length; i < ilen; ++i) {
-				model = points[i]._model;
-				if (isPointInArea(model, area)) {
-					if (i > 0 && isPointInArea(points[i - 1]._model, area)) {
-						model.controlPointPreviousX = capControlPoint(model.controlPointPreviousX, area.left, area.right);
-						model.controlPointPreviousY = capControlPoint(model.controlPointPreviousY, area.top, area.bottom);
-					}
-					if (i < points.length - 1 && isPointInArea(points[i + 1]._model, area)) {
-						model.controlPointNextX = capControlPoint(model.controlPointNextX, area.left, area.right);
-						model.controlPointNextY = capControlPoint(model.controlPointNextY, area.top, area.bottom);
-					}
-				}
-			}
-		}
-	},
-
-	draw: function() {
-		var me = this;
-		var chart = me.chart;
-		var meta = me.getMeta();
-		var points = meta.data || [];
-		var area = chart.chartArea;
-		var ilen = points.length;
-		var halfBorderWidth;
-		var i = 0;
-
-		if (lineEnabled(me.getDataset(), chart.options)) {
-			halfBorderWidth = (meta.dataset._model.borderWidth || 0) / 2;
-
-			helpers.canvas.clipArea(chart.ctx, {
-				left: area.left,
-				right: area.right,
-				top: area.top - halfBorderWidth,
-				bottom: area.bottom + halfBorderWidth
-			});
-
-			meta.dataset.draw();
-
-			helpers.canvas.unclipArea(chart.ctx);
-		}
-
-		// Draw the points
-		for (; i < ilen; ++i) {
-			points[i].draw(area);
-		}
-	},
-
-	/**
+  /**
+	 * @param {boolean} [active]
 	 * @protected
 	 */
-	setHoverStyle: function(point) {
-		var model = point._model;
-		var options = point._options;
-		var getHoverColor = helpers.getHoverColor;
+  resolveDatasetElementOptions(active) {
+    const me = this;
+    const config = me._config;
+    const options = me.chart.options;
+    const lineOptions = options.elements.line;
+    const values = super.resolveDatasetElementOptions(active);
+    const showLine = valueOrDefault(config.showLine, options.showLine);
 
-		point.$previousStyle = {
-			backgroundColor: model.backgroundColor,
-			borderColor: model.borderColor,
-			borderWidth: model.borderWidth,
-			radius: model.radius
-		};
+    // The default behavior of lines is to break at null values, according
+    // to https://github.com/chartjs/Chart.js/issues/2435#issuecomment-216718158
+    // This option gives lines the ability to span gaps
+    values.spanGaps = valueOrDefault(config.spanGaps, options.spanGaps);
+    values.tension = valueOrDefault(config.tension, lineOptions.tension);
+    values.stepped = resolve([config.stepped, lineOptions.stepped]);
 
-		model.backgroundColor = valueOrDefault(options.hoverBackgroundColor, getHoverColor(options.backgroundColor));
-		model.borderColor = valueOrDefault(options.hoverBorderColor, getHoverColor(options.borderColor));
-		model.borderWidth = valueOrDefault(options.hoverBorderWidth, options.borderWidth);
-		model.radius = valueOrDefault(options.hoverRadius, options.radius);
-	},
-});
+    if (!showLine) {
+      values.borderWidth = 0;
+    }
+
+    return values;
+  }
+
+  /**
+	 * @protected
+	 */
+  getMaxOverflow() {
+    const me = this;
+    const meta = me._cachedMeta;
+    const border = meta.dataset.options.borderWidth || 0;
+    const data = meta.data || [];
+    if (!data.length) {
+      return border;
+    }
+    const firstPoint = data[0].size();
+    const lastPoint = data[data.length - 1].size();
+    return Math.max(border, firstPoint, lastPoint) / 2;
+  }
+
+  draw() {
+    this._cachedMeta.dataset.updateControlPoints(this.chart.chartArea);
+    super.draw();
+  }
+}
+
+LineController.id = 'line';
+
+/**
+ * @type {any}
+ */
+LineController.defaults = {
+  datasetElementType: 'line',
+  datasetElementOptions: [
+    'backgroundColor',
+    'borderCapStyle',
+    'borderColor',
+    'borderDash',
+    'borderDashOffset',
+    'borderJoinStyle',
+    'borderWidth',
+    'capBezierPoints',
+    'cubicInterpolationMode',
+    'fill'
+  ],
+
+  dataElementType: 'point',
+  dataElementOptions: {
+    backgroundColor: 'pointBackgroundColor',
+    borderColor: 'pointBorderColor',
+    borderWidth: 'pointBorderWidth',
+    hitRadius: 'pointHitRadius',
+    hoverHitRadius: 'pointHitRadius',
+    hoverBackgroundColor: 'pointHoverBackgroundColor',
+    hoverBorderColor: 'pointHoverBorderColor',
+    hoverBorderWidth: 'pointHoverBorderWidth',
+    hoverRadius: 'pointHoverRadius',
+    pointStyle: 'pointStyle',
+    radius: 'pointRadius',
+    rotation: 'pointRotation'
+  },
+
+  showLine: true,
+  spanGaps: false,
+
+  interaction: {
+    mode: 'index'
+  },
+
+  hover: {},
+
+  scales: {
+    _index_: {
+      type: 'category',
+    },
+    _value_: {
+      type: 'linear',
+    },
+  }
+};
+
+function getStartAndCountOfVisiblePoints(meta, points, animationsDisabled) {
+  const pointCount = points.length;
+
+  let start = 0;
+  let count = pointCount;
+
+  if (meta._sorted) {
+    const {iScale, _parsed} = meta;
+    const axis = iScale.axis;
+    const {min, max, minDefined, maxDefined} = iScale.getUserBounds();
+    if (minDefined) {
+      start = _limitValue(Math.min(
+        _lookupByKey(_parsed, iScale.axis, min).lo,
+        animationsDisabled ? pointCount : _lookupByKey(points, axis, iScale.getPixelForValue(min)).lo),
+      0, pointCount - 1);
+    }
+    if (maxDefined) {
+      count = _limitValue(Math.max(
+        _lookupByKey(_parsed, iScale.axis, max).hi + 1,
+        animationsDisabled ? 0 : _lookupByKey(points, axis, iScale.getPixelForValue(max)).hi + 1),
+      start, pointCount) - start;
+    } else {
+      count = pointCount - start;
+    }
+  }
+
+  return {start, count};
+}
+
+function scaleRangesChanged(meta) {
+  const {xScale, yScale, _scaleRanges} = meta;
+  const newRanges = {
+    xmin: xScale.min,
+    xmax: xScale.max,
+    ymin: yScale.min,
+    ymax: yScale.max
+  };
+  if (!_scaleRanges) {
+    meta._scaleRanges = newRanges;
+    return true;
+  }
+  const changed = _scaleRanges.xmin !== xScale.min
+		|| _scaleRanges.xmax !== xScale.max
+		|| _scaleRanges.ymin !== yScale.min
+		|| _scaleRanges.ymax !== yScale.max;
+
+  Object.assign(_scaleRanges, newRanges);
+  return changed;
+}
